@@ -114,6 +114,7 @@ async function filterUsedWallets(wallets) {
 
       if (ownedNftCount) {
         wallets.splice(i, 1);
+        stats.alreadyOwned++;
       }
     } catch (e) {
       // Игнорируем
