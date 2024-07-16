@@ -13,6 +13,7 @@ const queue = new PQueue({ concurrency: config.concurrency });
 const stats = {
   minted: 0,
   alreadyOwned: 0,
+  total: wallets.length,
 };
 const startTime = Date.now();
 
@@ -30,15 +31,25 @@ function start() {
     wallets.sort(() => 0.5 - Math.random());
   }
 
-  queue
-    .addAll(wallets.map((wallet) => processWallet.bind(null, wallet)))
+  const intervalId = setInterval(() => {
+    console.log();
+    console.log(chalk.blueBright(`Осталось кошельков: ${queue.size}`));
+  }, 60_000);
+
+  filterUsedWallets(wallets)
+    .then(() => {
+      return queue.addAll(wallets.map((wallet) => processWallet.bind(null, wallet)));
+    })
     .then(() => {
       console.log();
-      console.log(chalk.bgGreenBright(`
+      console.log(chalk.bgGreen(`
 Работа завершена!
-${stats.minted + stats.alreadyOwned}/${wallets.length} кошельков имеют NFT
+${stats.minted + stats.alreadyOwned}/${stats.total} кошельков имеют NFT
 Время выполнения: ${Math.round((Date.now() - startTime) / 60_000)} мин.
       `.trim()));
+    })
+    .finally(() => {
+      clearInterval(intervalId);
     });
 }
 
@@ -51,34 +62,79 @@ async function processWallet(wallet) {
   const delaySeconds = getRandomInt(config.delay.min, config.delay.max);
 
   console.log();
-  console.log(chalk.yellow(`[${wallet.address}] Ждем ${delaySeconds} сек.`));
+  console.log(localeTime(), chalk.yellow(`[${wallet.address}] Ждем ${delaySeconds} сек.`));
 
   await sleep(delaySeconds * 1000);
 
-  const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
-  const ownedNftCount = await contract.balanceOf.staticCall(wallet.address);
+  try {
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+    const ownedNftCount = await contract.balanceOf.staticCall(wallet.address);
 
-  if (ownedNftCount) {
-    stats.alreadyOwned++;
+    if (ownedNftCount) {
+      stats.alreadyOwned++;
+
+      console.log();
+      console.log(localeTime(), chalk.gray(`[${wallet.address}] Уже имеет NFT`));
+
+      return;
+    }
+
+    const transaction = await contract.mint();
 
     console.log();
-    console.log(chalk.gray(`[${wallet.address}] Уже имеет NFT`));
+    console.log(localeTime(), chalk.greenBright(`[${wallet.address}] Минтим NFT...`));
+    console.log(chalk.gray(`Hash: ${transaction.hash}`));
 
-    return;
+    await transaction.wait(1, 150_000);
+
+    stats.minted++;
+
+    console.log();
+    console.log(localeTime(), chalk.green(`[${wallet.address}] NFT успешно получен!`));
+  } catch (e) {
+    console.log();
+    console.error(localeTime(), chalk.red(`[${wallet.address}] ${e.message}`));
+  }
+}
+
+/**
+ * @param {ethers.Wallet[]} wallets
+ */
+async function filterUsedWallets(wallets) {
+  const title = chalk.blueBright('Фильтруем кошельки что уже имеют NFT...');
+
+  process.stdout.write(title);
+
+  for (let i = wallets.length - 1; i >= 0; i--) {
+    const wallet = wallets[i].connect(rpcProvider);
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
+
+    try {
+      const ownedNftCount = await contract.balanceOf.staticCall(wallet.address);
+
+      if (ownedNftCount) {
+        wallets.splice(i, 1);
+      }
+    } catch (e) {
+      // Игнорируем
+    } finally {
+      const progress = Math.round((1 - (i + 1) / stats.total) * 100);
+
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+      process.stdout.write(title + chalk.blueBright(`${progress}%`));
+    }
   }
 
-  const transaction = await contract.mint();
+  process.stdout.clearLine(0);
+  process.stdout.cursorTo(0);
+  process.stdout.write(title + chalk.blueBright('100%') + '\n');
 
-  console.log();
-  console.log(chalk.greenBright(`[${wallet.address}] Минтим NFT...`));
-  console.log(chalk.gray(`Hash: ${transaction.hash}`));
+  const deletedCount = stats.total - wallets.length;
 
-  await transaction.wait(1, 150_000);
-
-  stats.minted++;
-
-  console.log();
-  console.log(chalk.green(`[${wallet.address}] NFT успешно получен!`));
+  if (deletedCount) {
+    console.log(chalk.blueBright(`${deletedCount} кошельков уже имеют NFT. Пропускаем их`));
+  }
 }
 
 function readWallets() {
@@ -95,6 +151,10 @@ function readWallets() {
 
     return line && !line.startsWith('#');
   }
+}
+
+function localeTime() {
+  return new Date().toLocaleTimeString();
 }
 
 function getRandomInt(min, max) {
